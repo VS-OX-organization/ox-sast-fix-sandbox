@@ -1,8 +1,12 @@
-"""HTTP diagnostics endpoint used by the on-call runbook to reach internal hosts.
+"""Fixed counterpart of server.py — same behavior, no command injection.
+
+Swap it in with `cp server_fixed.py server.py` (or apply fix.patch, which is
+generated from this file). Re-arm the sandbox with `git checkout -- server.py`.
 
 GET /diagnostics?host=10.0.0.7  ->  raw ping output for that host.
 """
 
+import ipaddress
 import subprocess
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -16,13 +20,18 @@ PING_TIMEOUT_SECONDS = 10
 def probe_host(host: str) -> str:
     """Return the raw ping output for `host`.
 
-    This is the planted SAST finding: `host` arrives straight from the HTTP
-    query string and is concatenated into a shell command line, so a request
-    for `?host=1.1.1.1;id` also runs `id` on the server (CWE-78, OS command
-    injection). Fix instructions live in README.md / server_fixed.py.
+    `host` is caller-controlled, so it is validated as a bare IP address and
+    passed as a separate argv entry with no shell involved. Neither step alone
+    is enough: validation without argv still trusts the shell parser, argv
+    without validation still lets a caller pass ping flags.
     """
-    command = "ping -c " + PING_COUNT + " " + host
-    return subprocess.check_output(command, shell=True, text=True, timeout=PING_TIMEOUT_SECONDS)
+    ipaddress.ip_address(host)
+    return subprocess.check_output(
+        ["ping", "-c", PING_COUNT, host],
+        shell=False,
+        text=True,
+        timeout=PING_TIMEOUT_SECONDS,
+    )
 
 
 class DiagnosticsHandler(BaseHTTPRequestHandler):
@@ -39,8 +48,11 @@ class DiagnosticsHandler(BaseHTTPRequestHandler):
 
         try:
             output = probe_host(host)
-        except subprocess.SubprocessError as err:
-            self.send_error(502, "probe failed: {0}".format(err))
+        except ValueError:
+            self.send_error(400, "host must be an IP address")
+            return
+        except subprocess.SubprocessError:
+            self.send_error(502, "probe failed")
             return
 
         self._respond(output)
