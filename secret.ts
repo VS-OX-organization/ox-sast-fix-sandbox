@@ -1,0 +1,1 @@
+const secretValue = "qwerty123";
